@@ -37,5 +37,35 @@ app.post("/stripe-webhook", bodyParser.raw({ type: "application/json" }), (req, 
 
   res.json({ received: true });
 });
+// GHL Webhook endpoint
+app.post("/ghl-webhook", bodyParser.json(), async (req, res) => {
+  console.log("📩 Received GHL webhook:", req.body);
+
+  try {
+    // Example: create/update contact in GHL using API key
+    const response = await fetch("https://rest.gohighlevel.com/v1/contacts/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GHL_API_KEY}`  // set this in Render ENV
+      },
+      body: JSON.stringify({
+        email: req.body.email || "unknown@example.com",
+        name: req.body.name || "Unnamed Contact",
+        phone: req.body.phone || "",
+        customField: req.body.customField || ""  // you can map more fields here
+      })
+    });
+
+    const data = await response.json();
+    console.log("✅ GHL response:", data);
+
+    res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error("❌ Error handling GHL webhook:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 app.listen(10000, () => console.log("🚀 Webhook server running"));
