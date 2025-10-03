@@ -1,7 +1,11 @@
 
 
 
+const express = require("express");
+const Stripe = require("stripe");
+const bodyParser = require("body-parser");
 
+const app = express();
 
 // --- GHL WEBHOOK (JSON parser) ---
 app.post("/webhook", bodyParser.json(), (req, res) => {
@@ -10,11 +14,7 @@ app.post("/webhook", bodyParser.json(), (req, res) => {
 });
 
 // --- STRIPE WEBHOOK (RAW parser for signature check) ---
-const express = require("express");
-const Stripe = require("stripe");
-const bodyParser = require("body-parser");
 
-const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
