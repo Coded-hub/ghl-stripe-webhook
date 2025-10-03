@@ -1,9 +1,7 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const Stripe = require("stripe");
 
-const app = express();
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY); // put your real key in .env
+
+
+
 
 // --- GHL WEBHOOK (JSON parser) ---
 app.post("/webhook", bodyParser.json(), (req, res) => {
