@@ -12,30 +12,32 @@ app.post("/webhook", bodyParser.json(), (req, res) => {
 });
 
 // --- STRIPE WEBHOOK (RAW parser for signature check) ---
-app.post(
-  "/stripe-webhook",
-  bodyParser.raw({ type: "application/json" }),
-  (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    let event;
+import express from "express";
+import Stripe from "stripe";
+import bodyParser from "body-parser";
 
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    } catch (err) {
-      console.error("❌ Stripe signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
+const app = express();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-    if (event.type === "payment_intent.succeeded") {
-      console.log("✅ Payment succeeded:", event.data.object.id);
-    }
+app.post("/stripe-webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
+  const sig = req.headers["stripe-signature"];
 
-    res.json({ received: true });
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    console.error("❌ Stripe signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-);
 
+  // Handle the event
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+    console.log("💰 PaymentIntent succeeded:", paymentIntent.id);
+  }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  res.json({ received: true });
 });
+
+app.listen(10000, () => console.log("🚀 Webhook server running"));
