@@ -3,17 +3,15 @@ const bodyParser = require("body-parser");
 const Stripe = require("stripe");
 
 const app = express();
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY); // put your real key in .env
 
-// GHL webhook - JSON body
-app.use("/webhook", bodyParser.json(), (req, res) => {
+// --- GHL WEBHOOK (JSON parser) ---
+app.post("/webhook", bodyParser.json(), (req, res) => {
   console.log("📩 Received GHL webhook:", req.body);
   res.status(200).send({ success: true });
 });
 
-// Stripe webhook requires raw body
-const stripe = Stripe("sk_test_yourSecretKeyHere"); // replace with your Stripe secret key
-const endpointSecret = "whsec_yourWebhookSecretHere"; // replace with your webhook secret
-
+// --- STRIPE WEBHOOK (RAW parser for signature check) ---
 app.post(
   "/stripe-webhook",
   bodyParser.raw({ type: "application/json" }),
@@ -28,23 +26,16 @@ app.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // Handle Stripe events
-    switch (event.type) {
-      case "payment_intent.succeeded":
-        console.log("✅ PaymentIntent succeeded:", event.data.object.id);
-        break;
-      case "charge.failed":
-        console.log("❌ Charge failed:", event.data.object.id);
-        break;
-      default:
-        console.log(`⚠️ Unhandled event type ${event.type}`);
+    if (event.type === "payment_intent.succeeded") {
+      console.log("✅ Payment succeeded:", event.data.object.id);
     }
 
     res.json({ received: true });
   }
 );
 
-const PORT = process.env.PORT || 10000;
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Webhook server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
