@@ -68,11 +68,33 @@ app.post("/save-business-info", async (req, res) => {
 // -------------------
 // 💳 Stripe Webhook
 // -------------------
+app.use((req, res, next) => {
+  if (req.originalUrl === "/stripe-webhook") {
+    next(); // skip JSON parsing for this route
+  } else {
+    express.json()(req, res, next);
+  }
+});
+
+// ✅ Normal route — parse JSON normally
+app.post("/save-business-info", (req, res) => {
+  const { email, business_name, tax_id } = req.body;
+
+  if (!email) {
+    console.log("❌ Missing email in form data");
+    return res.status(400).send("Missing email");
+  }
+
+  businessDataStore[email.toLowerCase()] = { business_name, tax_id };
+  console.log(`✅ Clean business data stored:`, businessDataStore[email.toLowerCase()]);
+  res.status(200).send("Business info saved");
+});
+
+// ✅ Stripe webhook route — RAW body only
 app.post("/stripe-webhook", express.raw({ type: "application/json" }), async (req, res) => {
   let event;
 
   try {
-    // Verify webhook signature
     const sig = req.headers["stripe-signature"];
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
@@ -100,14 +122,10 @@ app.post("/stripe-webhook", express.raw({ type: "application/json" }), async (re
     console.log(`💡 Updating Stripe customer ${customerId} with ${business_name}, ${tax_id}`);
 
     try {
-      // Update customer's official business name
-      await stripe.customers.update(customerId, {
-        name: business_name,
-      });
+      await stripe.customers.update(customerId, { name: business_name });
 
-      // Add official Tax ID to Stripe customer
       await stripe.customers.createTaxId(customerId, {
-        type: "eu_vat", // Adjust if needed (e.g., "us_ein" for US)
+        type: "eu_vat", // adjust if needed
         value: tax_id,
       });
 
