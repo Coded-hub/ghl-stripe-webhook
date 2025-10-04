@@ -16,8 +16,6 @@ let formSubmissions = {};
 // -------------------
 // 🧩 GHL → Save form data
 // -------------------
-import express from "express";
-const app = express();
 app.use(express.json());
 
 const businessDataStore = {};
