@@ -1,119 +1,139 @@
 import express from "express";
 import bodyParser from "body-parser";
+import dotenv from "dotenv";
 import Stripe from "stripe";
 import axios from "axios";
-import dotenv from "dotenv";
 
 dotenv.config();
-
 const app = express();
-const port = process.env.PORT || 3000;
 
-// ✅ Stripe setup
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+const ghlApiKey = process.env.GHL_API_KEY;
 
-// ✅ Parse raw body for Stripe webhook
+// ✅ 1. Parse raw body for Stripe verification
 app.post(
   "/stripe-webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-
     let event;
+
     try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
+      const sig = req.headers["stripe-signature"];
+      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
       console.log("✅ Stripe webhook verified:", event.type);
     } catch (err) {
-      console.error("❌ Webhook verification failed:", err.message);
+      console.error("❌ Webhook signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // Handle successful payment
+    // ✅ Handle successful payments
     if (event.type === "payment_intent.succeeded") {
       const paymentIntent = event.data.object;
       const email =
         paymentIntent.receipt_email ||
         paymentIntent.customer_email ||
-        paymentIntent.metadata?.email;
-      const businessName = paymentIntent.metadata?.business_name;
-      const contactId = paymentIntent.metadata?.contact_id;
+        (paymentIntent.customer_object &&
+          paymentIntent.customer_object.email);
 
-      console.log("✅ Email found:", email || "None");
-      console.log("✅ Business name:", businessName || "None");
-      console.log("✅ Contact ID:", contactId || "None");
+      console.log(`✅ Email found: ${email}`);
 
-      // Check if we have enough info to proceed
-      if (!email || !contactId) {
-        console.warn("⚠️ Missing one or more required fields");
-        return res.status(200).json({ received: true });
+      if (!email) {
+        console.log("⚠️ Missing email in payment intent and customer — skipping update.");
+        return res.sendStatus(200);
+      }
+
+      // Fetch business info from memory or fallback
+      const businessData = customerData[email];
+      if (!businessData) {
+        console.log(`⚠️ No business data found for ${email}`);
+        return res.sendStatus(200);
       }
 
       try {
-        // ✅ Send update directly to GHL API
-        const ghlUrl = `https://services.leadconnectorhq.com/v1/contacts/${contactId}`;
+        // ✅ Update Stripe customer record
+        const customers = await stripe.customers.list({ email });
+        const customer = customers.data[0];
 
-        const updateData = {
-          email,
-          customField: {
-            business_name: businessName || "Unknown Business",
-          },
-          tags: ["Paid"],
-        };
+        if (customer) {
+          await stripe.customers.update(customer.id, {
+            name: businessData.business_name,
+          });
 
-        const response = await axios.put(ghlUrl, updateData, {
-          headers: {
-            Authorization: `Bearer ${process.env.GHL_API_KEY}`,
-            Version: "2021-07-28",
-            "Content-Type": "application/json",
-          },
-        });
+          if (businessData.tax_id) {
+            await stripe.customers.createTaxId(customer.id, {
+              type: "eu_vat",
+              value: businessData.tax_id,
+            });
+          }
 
-        console.log("✅ Successfully updated contact in GHL:", response.status);
-      } catch (error) {
-        console.error(
-          "❌ Failed to update contact in GHL:",
-          error.response?.data || error.message
-        );
+          console.log(`✅ Updated Stripe customer for ${email}`);
+        } else {
+          console.log(`⚠️ No Stripe customer found for ${email}`);
+        }
+      } catch (err) {
+        console.error("❌ Stripe update failed:", err.message);
       }
     }
 
-    res.json({ received: true });
+    res.sendStatus(200);
   }
 );
 
-// ✅ Body parser for non-Stripe routes
+// ✅ 2. Use JSON parser for all other routes
 app.use(bodyParser.json());
 
-// ✅ GHL form webhook (incoming from GHL form submissions)
+// Temporary in-memory storage for GHL data
+const customerData = {};
+
+// ✅ 3. GHL Webhook: Capture business name + tax ID
 app.post("/ghl-webhook", async (req, res) => {
-    console.log("✅ Received form submission from GHL:", req.body);
+  const authHeader = req.headers.authorization;
 
-    try {
-        const { email, contact_id, business_name } = req.body;
+  // Check for GHL API key
+  if (!authHeader || authHeader !== `Bearer ${ghlApiKey}`) {
+    console.log("❌ Unauthorized GHL webhook request");
+    return res.status(401).send("Unauthorized");
+  }
 
-        if (!email || !contact_id) {
-            console.warn("⚠️ Missing email or contact_id in GHL submission");
-            return res.status(200).json({ received: true });
-        }
+  const body = req.body;
+  const email =
+    body.email ||
+    (body.contact && body.contact.email) ||
+    (body.customData && body.customData.email);
 
-        console.log("✅ Saving business data for later use...");
+  const business_name =
+    body["Business Name"] ||
+    body.business_name ||
+    (body.customData && body.customData.business_name);
 
-        // You can store this temporarily (e.g. in-memory for now)
-        // Later, you can connect a DB like Mongo or Redis if needed
-        // For now, just log it
-        console.log({ email, contact_id, business_name });
+  const tax_id =
+    body["Tax-ID (VAT/CUI)"] ||
+    body.tax_id ||
+    (body.customData && body.customData.tax_id);
 
-        res.json({ success: true });
-    } catch (error) {
-        console.error("❌ Error processing GHL webhook:", error.message);
-        res.status(500).json({ error: "Internal server error" });
-    }
+  console.log("📩 GHL Webhook Received:", { email, business_name, tax_id });
+
+  if (!email || !business_name || !tax_id) {
+    console.log("⚠️ Missing one or more required fields");
+    return res.sendStatus(400);
+  }
+
+  // ✅ Store for later Stripe lookup
+  customerData[email] = { business_name, tax_id };
+
+  console.log(`✅ Saved data for ${email}:`, customerData[email]);
+
+  res.sendStatus(200);
 });
 
-app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
+// ✅ Root route for Render check
+app.get("/", (req, res) => {
+  res.send("✅ GHL ↔ Stripe Webhook Server is running!");
 });
+
+// ✅ Render Port Binding
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
