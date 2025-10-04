@@ -1,71 +1,77 @@
-
-
-
-const express = require("express");
-const Stripe = require("stripe");
-const bodyParser = require("body-parser");
+import express from "express";
+import Stripe from "stripe";
+import bodyParser from "body-parser";
 
 const app = express();
-
-// --- GHL WEBHOOK (JSON parser) ---
-app.post("/webhook", bodyParser.json(), (req, res) => {
-  console.log("📩 Received GHL webhook:", req.body);
-  res.status(200).send({ success: true });
-});
-
-// --- STRIPE WEBHOOK (RAW parser for signature check) ---
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-app.post("/stripe-webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
-  const sig = req.headers["stripe-signature"];
+// Temporary in-memory storage for GHL form data
+const formDataStore = new Map();
 
+// GHL form data endpoint
+app.post("/save-business-info", bodyParser.json(), (req, res) => {
+  const { email, business_name, tax_id } = req.body;
+
+  if (!email) {
+    console.log("❌ Missing email, cannot store form data");
+    return res.status(400).json({ success: false, message: "Email is required" });
+  }
+
+  formDataStore.set(email.toLowerCase(), { business_name, tax_id });
+  console.log("✅ Saved form data for:", email, { business_name, tax_id });
+
+  res.json({ success: true });
+});
+
+// Stripe webhook endpoint
+app.post("/stripe-webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
   let event;
+
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
-    console.error("❌ Stripe signature verification failed:", err.message);
+    console.log("❌ Stripe signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle the event
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
-    console.log("💰 PaymentIntent succeeded:", paymentIntent.id);
+    const email = paymentIntent.receipt_email || paymentIntent.customer_email;
+
+    console.log("💰 Payment successful for:", email);
+
+    // Match form data (if submitted earlier)
+    const formData = formDataStore.get(email?.toLowerCase());
+    if (formData) {
+      console.log("✅ Found matching form data:", formData);
+
+      // Combine Stripe + GHL data
+      const combinedData = {
+        email,
+        amount: paymentIntent.amount_received / 100,
+        currency: paymentIntent.currency,
+        business_name: formData.business_name,
+        tax_id: formData.tax_id,
+        stripe_payment_id: paymentIntent.id,
+      };
+
+      console.log("📦 Combined data ready for Oblio:", combinedData);
+
+      // TODO: send this to Oblio via API (we’ll handle this next)
+    } else {
+      console.log("⚠️ No form data found for this email.");
+    }
   }
 
-  res.json({ received: true });
-});
-// GHL Webhook endpoint
-app.post("/ghl-webhook", bodyParser.json(), async (req, res) => {
-  console.log("📩 Received GHL webhook:", req.body);
-
-  try {
-    // Example: create/update contact in GHL using API key
-    const response = await fetch("https://rest.gohighlevel.com/v1/contacts/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GHL_API_KEY}`  // set this in Render ENV
-      },
-      body: JSON.stringify({
-        email: req.body.email || "unknown@example.com",
-        name: req.body.name || "Unnamed Contact",
-        phone: req.body.phone || "",
-        customField: req.body.customField || ""  // you can map more fields here
-      })
-    });
-
-    const data = await response.json();
-    console.log("✅ GHL response:", data);
-
-    res.status(200).json({ success: true, data });
-  } catch (err) {
-    console.error("❌ Error handling GHL webhook:", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
+  res.send();
 });
 
+// Default route
+app.get("/", (req, res) => {
+  res.send("✅ Server is running");
+});
 
-app.listen(10000, () => console.log("🚀 Webhook server running"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
