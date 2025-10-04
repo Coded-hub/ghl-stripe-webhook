@@ -16,25 +16,56 @@ let formSubmissions = {};
 // -------------------
 // 🧩 GHL → Save form data
 // -------------------
-app.post("/save-business-info", bodyParser.json(), (req, res) => {
-  console.log("📦 Full webhook body received:", JSON.stringify(req.body, null, 2));
+import express from "express";
+const app = express();
+app.use(express.json());
 
-  // Extract from customData (actual payload structure)
-  const { customData } = req.body || {};
-  const email = customData?.email;
-  const business_name = customData?.business_name;
-  const tax_id = customData?.tax_id;
+const businessDataStore = {};
 
-  console.log("✅ Extracted from customData:", { email, business_name, tax_id });
+app.post("/save-business-info", async (req, res) => {
+  try {
+    const body = req.body;
 
-  if (email) {
-    formSubmissions[email] = { business_name, tax_id };
-    console.log(`💾 Saved form data for ${email}`, formSubmissions[email]);
-    res.json({ success: true });
-  } else {
-    res.status(400).json({ error: "Missing email field in form submission" });
+    // Extract just the fields we care about
+    const email =
+      body?.email ||
+      body?.["email address"] ||
+      body?.customData?.email;
+
+    const business_name =
+      body?.["Business Name"] ||
+      body?.["business_name"] ||
+      body?.customData?.business_name;
+
+    const tax_id =
+      body?.["Tax-ID (VAT/CUI)"] ||
+      body?.["tax_id"] ||
+      body?.customData?.tax_id;
+
+    if (!email || !business_name || !tax_id) {
+      console.log("⚠️ Missing fields:", { email, business_name, tax_id });
+      return res.status(400).json({
+        error: "Missing one or more required fields (email, business_name, tax_id)",
+        received: { email, business_name, tax_id },
+      });
+    }
+
+    // Store it in memory (you can replace this with a database if needed)
+    businessDataStore[email.toLowerCase()] = { business_name, tax_id };
+
+    console.log("✅ Clean business data stored:", businessDataStore[email.toLowerCase()]);
+
+    res.status(200).json({
+      message: "Business info stored successfully",
+      stored: businessDataStore[email.toLowerCase()],
+    });
+  } catch (error) {
+    console.error("❌ Error saving business info:", error);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
+
+
 
 // -------------------
 // 💳 Stripe Webhook
