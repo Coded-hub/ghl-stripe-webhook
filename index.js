@@ -68,44 +68,58 @@ app.post("/save-business-info", async (req, res) => {
 // -------------------
 // 💳 Stripe Webhook
 // -------------------
-app.post(
-  "/stripe-webhook",
-  express.raw({ type: "application/json" }),
-  (req, res) => {
+app.post("/stripe-webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  let event;
+
+  try {
+    // Verify webhook signature
     const sig = req.headers["stripe-signature"];
-    let event;
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    console.error("❌ Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+    const email = paymentIntent.receipt_email?.toLowerCase();
+    const customerId = paymentIntent.customer;
+
+    if (!email || !customerId) {
+      console.log("⚠️ Missing email or customer ID in payment intent");
+      return res.sendStatus(200);
+    }
+
+    const businessData = businessDataStore[email];
+    if (!businessData) {
+      console.log(`⚠️ No business info stored for ${email}`);
+      return res.sendStatus(200);
+    }
+
+    const { business_name, tax_id } = businessData;
+    console.log(`💡 Updating Stripe customer ${customerId} with ${business_name}, ${tax_id}`);
 
     try {
-      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+      // Update customer's official business name
+      await stripe.customers.update(customerId, {
+        name: business_name,
+      });
+
+      // Add official Tax ID to Stripe customer
+      await stripe.customers.createTaxId(customerId, {
+        type: "eu_vat", // Adjust if needed (e.g., "us_ein" for US)
+        value: tax_id,
+      });
+
+      console.log(`✅ Stripe customer ${email} updated successfully`);
     } catch (err) {
-      console.error("❌ Stripe signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
+      console.error("❌ Failed to update Stripe customer:", err);
     }
-
-    if (event.type === "payment_intent.succeeded") {
-      const paymentIntent = event.data.object;
-      const email = paymentIntent.receipt_email;
-
-      console.log("💳 Payment received for:", email);
-
-      const formData = formSubmissions[email];
-      if (formData) {
-        console.log("🧾 Matched form data:", formData);
-        console.log(`✅ Combined record for ${email}:`, {
-          ...formData,
-          amount: paymentIntent.amount / 100,
-          currency: paymentIntent.currency,
-        });
-
-        // 👉 Optionally, send this data to Oblio or update Stripe Customer here
-      } else {
-        console.warn("⚠️ No matching form submission found for:", email);
-      }
-    }
-
-    res.sendStatus(200);
   }
-);
+
+  res.sendStatus(200);
+});
+
 
 // -------------------
 app.get("/", (req, res) => {
