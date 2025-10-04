@@ -1,176 +1,142 @@
 import express from "express";
 import Stripe from "stripe";
-import axios from "axios";
+import bodyParser from "body-parser";
 import dotenv from "dotenv";
+import axios from "axios";
 
 dotenv.config();
-
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ✅ Use raw body only for Stripe webhooks
-app.use((req, res, next) => {
-  if (req.originalUrl === "/stripe-webhook") {
-    next();
-  } else {
-    express.json()(req, res, next);
-  }
-});
+// 🧠 In-memory store for form submissions (email → business info)
+const businessDataStore = {};
 
-// Temporary in-memory store (for dev/demo)
-const businessData = {};
-
-/* ======================================================
-   1️⃣ GHL FORM → /save-business-info
-   ====================================================== */
-app.post("/save-business-info", async (req, res) => {
-  const data = req.body;
-  const email = data.email;
-  const business_name = data.business_name;
-  const tax_id = data.tax_id;
-
-  if (!email || !business_name || !tax_id) {
-    console.log("⚠️ Missing one or more required fields");
-    return res.status(400).send("Missing fields");
-  }
-
-  try {
-    // Create or update the Stripe customer immediately
-    const customers = await stripe.customers.list({ email, limit: 1 });
-    let customer;
-
-    if (customers.data.length > 0) {
-      customer = customers.data[0];
-      await stripe.customers.update(customer.id, { name: business_name });
-    } else {
-      customer = await stripe.customers.create({
-        email,
-        name: business_name,
-      });
-    }
-
-    // Add tax ID if provided
-    if (tax_id) {
-      await stripe.customers.createTaxId(customer.id, {
-        type: "eu_vat",
-        value: tax_id,
-      });
-    }
-
-    console.log(`✅ Stripe customer updated immediately for ${email}`);
-    res.json({ success: true });
-  } catch (error) {
-    console.error("❌ Stripe update failed:", error.message);
-    res.status(500).send("Stripe update failed");
-  }
-});
-
-
-/* ======================================================
-   2️⃣ STRIPE → /stripe-webhook
-   ====================================================== */
-app.post(
-  "/stripe-webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    let event;
-
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-      console.log("✅ Stripe webhook verified:", event.type);
-    } catch (err) {
-      console.error("❌ Webhook signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    // Handle only successful payments
-    if (event.type === "payment_intent.succeeded") {
-      const paymentIntent = event.data.object;
-      let email = paymentIntent.receipt_email;
-
-      // 🔍 Try to get email if missing
-      if (!email && paymentIntent.customer) {
-        try {
-          const customer = await stripe.customers.retrieve(paymentIntent.customer);
-          email = customer.email;
-        } catch (err) {
-          console.log("⚠️ Could not retrieve customer:", err.message);
-        }
+// ✅ Capture raw body for Stripe signature verification
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      if (req.originalUrl.startsWith("/stripe-webhook")) {
+        req.rawBody = buf;
       }
-
-      if (!email && paymentIntent.latest_charge) {
-        try {
-          const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
-          email = charge.billing_details.email;
-        } catch (err) {
-          console.log("⚠️ Could not retrieve charge:", err.message);
-        }
-      }
-
-      if (!email) {
-        console.log("⚠️ Missing email in payment intent and customer — skipping update.");
-        return res.status(200).send("No email found, skipping update.");
-      }
-
-      console.log("✅ Email found:", email);
-
-      const cleanEmail = email.toLowerCase();
-      const data = businessData[cleanEmail];
-
-      if (data) {
-        const { business_name, tax_id } = data;
-        const customerId = paymentIntent.customer;
-
-        if (customerId) {
-          try {
-            // ✅ Update official customer fields
-            await stripe.customers.update(customerId, {
-              name: business_name,
-            });
-
-            // ✅ Add official tax ID
-            await stripe.customers.createTaxId(customerId, {
-              type: "eu_vat", // or "us_ein", adjust as needed
-              value: tax_id,
-            });
-
-            console.log(
-              `✅ Updated customer ${customerId} with business: ${business_name}, tax ID: ${tax_id}`
-            );
-
-            // ✅ (Optional) Notify GHL that Stripe update succeeded
-            if (process.env.GHL_WEBHOOK_URL) {
-              await axios.post(process.env.GHL_WEBHOOK_URL, {
-                email,
-                business_name,
-                tax_id,
-              });
-              console.log("📨 Sent confirmation to GHL webhook");
-            }
-          } catch (err) {
-            console.error("❌ Error updating Stripe customer:", err.message);
-          }
-        }
-      } else {
-        console.log(`⚠️ No business data found for ${cleanEmail}`);
-      }
-    }
-
-    res.json({ received: true });
-  }
+    },
+  })
 );
 
-/* ======================================================
-   3️⃣ Health Check (optional)
-   ====================================================== */
+// ✅ Simple route check
 app.get("/", (req, res) => {
-  res.send("✅ GHL ↔ Stripe Webhook server running!");
+  res.send("✅ Stripe ↔ GHL Webhook Server is live!");
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server live on port ${PORT}`));
+//
+// ---------------------------------------------------------------------------
+// 1️⃣ GHL → /save-business-info
+// ---------------------------------------------------------------------------
+app.post("/save-business-info", async (req, res) => {
+  try {
+    const { email, business_name, tax_id } = req.body;
+
+    if (!email || !business_name || !tax_id) {
+      console.log("❌ Missing one or more required fields", req.body);
+      return res.status(400).json({ success: false, message: "Missing fields" });
+    }
+
+    const normalizedEmail = email.toLowerCase();
+    businessDataStore[normalizedEmail] = { business_name, tax_id };
+
+    console.log(`✅ Business info stored for ${normalizedEmail}:`, {
+      business_name,
+      tax_id,
+    });
+
+    console.log("🧾 Current saved customers:", businessDataStore);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Error saving business info:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
+//
+// ---------------------------------------------------------------------------
+// 2️⃣ Stripe → /stripe-webhook
+// ---------------------------------------------------------------------------
+app.post("/stripe-webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.rawBody, sig, endpointSecret);
+    console.log(`✅ Stripe webhook verified: ${event.type}`);
+  } catch (err) {
+    console.error("❌ Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+    const customerId = paymentIntent.customer;
+    const customerEmail = paymentIntent.receipt_email?.toLowerCase();
+
+    if (!customerEmail) {
+      console.log("⚠️ Missing email in payment intent and customer — skipping update.");
+      return res.status(200).json({ received: true });
+    }
+
+    console.log(`✅ Email found: ${customerEmail}`);
+
+    const businessData = businessDataStore[customerEmail];
+    if (!businessData) {
+      console.log(`⚠️ No business data found for ${customerEmail}`);
+      return res.status(200).json({ received: true });
+    }
+
+    const { business_name, tax_id } = businessData;
+    console.log(`✅ Found business data for ${customerEmail}:`, businessData);
+
+    // ✅ Update Stripe customer
+    stripe.customers
+      .update(customerId, { name: business_name })
+      .then(() =>
+        stripe.customers.createTaxId(customerId, {
+          type: "eu_vat", // or "us_ein" depending on your client region
+          value: tax_id,
+        })
+      )
+      .then(() => console.log(`✅ Stripe customer updated successfully for ${customerEmail}`))
+      .catch((err) => console.error("❌ Stripe customer update error:", err.message));
+  }
+
+  res.json({ received: true });
+});
+
+//
+// ---------------------------------------------------------------------------
+// 3️⃣ GHL Automation Relay (optional)
+// ---------------------------------------------------------------------------
+app.post("/ghl-webhook", async (req, res) => {
+  try {
+    const { email } = req.body;
+    console.log("📩 GHL webhook received:", req.body);
+
+    // Example: trigger automation in GHL if needed
+    if (email) {
+      await axios.post(process.env.GHL_AUTOMATION_URL, { email });
+      console.log(`✅ Forwarded automation trigger for ${email}`);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Error in GHL relay:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
+//
+// ---------------------------------------------------------------------------
+// 🚀 Server
+// ---------------------------------------------------------------------------
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
