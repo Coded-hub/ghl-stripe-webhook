@@ -24,23 +24,47 @@ const businessData = {};
    1️⃣ GHL FORM → /save-business-info
    ====================================================== */
 app.post("/save-business-info", async (req, res) => {
-  try {
-    const { email, business_name, tax_id } = req.body;
+  const data = req.body;
+  const email = data.email;
+  const business_name = data.business_name;
+  const tax_id = data.tax_id;
 
-    if (!email || !business_name || !tax_id) {
-      console.log("❌ Missing one or more fields:", req.body);
-      return res.status(400).json({ error: "Missing required fields" });
+  if (!email || !business_name || !tax_id) {
+    console.log("⚠️ Missing one or more required fields");
+    return res.status(400).send("Missing fields");
+  }
+
+  try {
+    // Create or update the Stripe customer immediately
+    const customers = await stripe.customers.list({ email, limit: 1 });
+    let customer;
+
+    if (customers.data.length > 0) {
+      customer = customers.data[0];
+      await stripe.customers.update(customer.id, { name: business_name });
+    } else {
+      customer = await stripe.customers.create({
+        email,
+        name: business_name,
+      });
     }
 
-    businessData[email.toLowerCase()] = { business_name, tax_id };
-    console.log("✅ Clean business data stored:", businessData[email.toLowerCase()]);
+    // Add tax ID if provided
+    if (tax_id) {
+      await stripe.customers.createTaxId(customer.id, {
+        type: "eu_vat",
+        value: tax_id,
+      });
+    }
 
-    return res.status(200).json({ success: true });
-  } catch (err) {
-    console.error("❌ Error in /save-business-info:", err.message);
-    return res.status(500).json({ error: err.message });
+    console.log(`✅ Stripe customer updated immediately for ${email}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error("❌ Stripe update failed:", error.message);
+    res.status(500).send("Stripe update failed");
   }
 });
+
 
 /* ======================================================
    2️⃣ STRIPE → /stripe-webhook
