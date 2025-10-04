@@ -11,18 +11,16 @@ const formDataStore = new Map();
 
 // GHL form data endpoint
 app.post("/save-business-info", bodyParser.json(), (req, res) => {
+  console.log("📦 Full webhook body received:", JSON.stringify(req.body, null, 2));
+
   const { email, business_name, tax_id } = req.body;
 
-  if (!email) {
-    console.log("❌ Missing email, cannot store form data");
-    return res.status(400).json({ success: false, message: "Email is required" });
-  }
+  console.log("✅ Extracted data:", { email, business_name, tax_id });
 
-  formDataStore.set(email.toLowerCase(), { business_name, tax_id });
-  console.log("✅ Saved form data for:", email, { business_name, tax_id });
-
+  formSubmissions[email] = { business_name, tax_id };
   res.json({ success: true });
 });
+
 
 // Stripe webhook endpoint
 app.post("/stripe-webhook", express.raw({ type: "application/json" }), async (req, res) => {
