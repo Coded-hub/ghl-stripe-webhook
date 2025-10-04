@@ -49,37 +49,35 @@ app.post(
     }
 
     // Process successful payments
-    if (event.type === "payment_intent.succeeded") {
-      const paymentIntent = event.data.object;
-      const email = paymentIntent.receipt_email?.toLowerCase();
-      if (!email) {
-        console.warn("⚠️ Missing email in payment intent");
-        return res.sendStatus(200);
-      }
+    if (event.type === "payment_intent.succeeded") 
+     // Try to get email from payment intent first
+let email = paymentIntent.receipt_email;
 
-      const customerId = paymentIntent.customer;
-      const data = businessData[email];
-
-      if (data && customerId) {
-        const { business_name, tax_id } = data;
-        console.log(`💾 Updating Stripe customer for ${email}`, data);
-
-        try {
-          await stripe.customers.update(customerId, { name: business_name });
-          await stripe.customers.createTaxId(customerId, {
-            type: "eu_vat", // or "us_ein"
-            value: tax_id,
-          });
-          console.log("✅ Stripe customer updated successfully");
-        } catch (updateError) {
-          console.error("❌ Failed to update Stripe customer:", updateError.message);
-        }
-      }
-    }
-
-    res.status(200).send("Success");
+// ✅ If email is missing, try to retrieve it from the customer or charge
+if (!email && paymentIntent.customer) {
+  try {
+    const customer = await stripe.customers.retrieve(paymentIntent.customer);
+    email = customer.email;
+  } catch (err) {
+    console.log("⚠️ Could not retrieve customer:", err.message);
   }
-);
+}
+
+if (!email && paymentIntent.latest_charge) {
+  try {
+    const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
+    email = charge.billing_details.email;
+  } catch (err) {
+    console.log("⚠️ Could not retrieve charge:", err.message);
+  }
+}
+
+if (!email) {
+  console.log("⚠️ Missing email in payment intent and customer — skipping update.");
+  return res.status(200).send("No email found, skipping update.");
+}
+
+console.log("✅ Email found:", email);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
